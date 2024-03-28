@@ -825,8 +825,348 @@ async function handleRequest_Teacher(request, env) {
 
 //////////////////////////////////////////////////////先生用エンドポイント終了///////////////////////////////////////////////////
 
+/////////////////////////////////////////////////////生徒用エンドポイント開始////////////////////////////////////////////////////
+async function handleRequest_Student(request, env) {
+	if (pathname === "/v2/student/join") {//生徒のクラス参加
+		const data = await request.json();
+		var class_Code = data.class_Code;
+		var userName = data.userName;
+		var userEmail = data.userEmail;
+		console.log(class_Code, userName, userEmail)
+		if (IsInvalid(class_Code) && IsInvalid(userName)) {
+			console.error("required value is not specified.",);//生徒数の変更失敗処理
+			return new Response(JSON.stringify([{ "message": "Required value is not specified.:", "status_Code": "NE-11", "result": "error" }]), await headerMaker(400, true));
+		}
+		console.log(class_Code)
+		//クラス参加処理スタート
+		try {
+			const { results: specifiedClassInfo } = await env.D1_DATABASE.prepare(
+				"SELECT * FROM Classes WHERE class_Code = ?"
+			)
+				.bind(class_Code)
+				.all();
 
-//testrun
+			console.log("Query results:", specifiedClassInfo);
+
+			if (specifiedClassInfo.length != 0) {//クラスが存在する
+				if (specifiedClassInfo[0].active == "true") {//クラスがアクティブかの切り分け
+					try {//生徒数の変更
+						try {
+							var class_Settings = JSON.parse(specifiedClassInfo[0].Settings);
+							var Maximum_Student_Count;
+							if (IsInvalid(class_Settings.MaximumStudent)) {//v3.0以前のクラスの対応
+								Maximum_Student_Count = 100;
+							}
+							else {
+								Maximum_Student_Count = class_Settings.MaximumStudent;
+							}
+
+							if (specifiedClassInfo[0].students != Maximum_Student_Count) {//最大数チェック
+
+								const result = await env.D1_DATABASE.prepare(
+									"UPDATE Classes SET students = " + String(Number(specifiedClassInfo[0].students) + 1) + " WHERE class_Code = " + class_Code
+								).run();
+								console.log(result.meta.changes + "箇所のデータが変更されました。");
+								if (!(result.meta.changes > 0)) {
+									console.error("Update failed.");//生徒数の変更失敗処理
+									return new Response(JSON.stringify([{ "message": "Update failed.", "status_Code": "JE-05", "result": "error" }]), await headerMaker(500, true));
+								}
+							}
+							else {//接続生徒数が最大値を超えたとき
+								return new Response(JSON.stringify([{ "message": "Exceeded Maximum Student Count. You cannnot connect this class.", "status_Code": "JE-06", "result": "error" }]), {
+									status: 403,
+									headers: {
+										"Content-Type": "application/json",
+										"Access-Control-Allow-Origin": "https://app.cla-q.net",
+										"Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+										"Access-Control-Allow-Headers": "Content-Type"
+									},
+								});
+							}
+						}
+						catch (error) {
+							const result = await env.D1_DATABASE.prepare(
+								"UPDATE Classes SET students = " + String(Number(specifiedClassInfo[0].students) + 1) + " WHERE class_Code = " + class_Code
+							).run();
+							console.log(result.meta.changes + "箇所のデータが変更されました。");
+							if (!(result.meta.changes > 0)) {
+								console.error("Update failed.");//生徒数の変更失敗処理
+								return new Response(JSON.stringify([{ "message": "Update failed.", "status_Code": "JE-05", "result": "error" }]), await headerMaker(500, true));
+							}
+						}
+					} catch (error) {
+						console.error("Database error:", error);//生徒数の変更失敗処理
+						return new Response(JSON.stringify([{ "message": "Error changing students value of table:Classes", "status_Code": "JE-04", "result": "error" }]), await headerMaker(500, true));
+					}
+
+					//クラステーブルへの参加
+					var currentTime = String(Math.floor(new Date().getTime() / 1000)); // 現在のUNIXTIMEを取得
+					const answeredQuestions = 0;
+					try {//参加済みユーザーに追加
+						await env.D1_DATABASE.prepare("INSERT INTO ConnectedUsers VALUES ('" + class_Code + "','" + userName + "','" + currentTime + "','" + answeredQuestions + "','" + userEmail + "')"
+						).run();
+
+						console.log("User added successfully to ConnectedUsers table.");
+						specifiedClassInfo.push({ "message": "joined class successfully.", "status_Code": "J-1", "result": "success" })
+						return new Response(JSON.stringify(specifiedClassInfo), await headerMaker(200, true));
+					}
+					catch (error) {
+						if (String(error).includes("constraint")) {
+							;//すでにクラスに参加済みのとき
+							try {
+								const { results: connectedUsersResults } = await env.D1_DATABASE.prepare(//すでに接続しているクラスのクラスコードを取得
+									"SELECT * FROM ConnectedUsers WHERE connected_User_Name = ?"
+								)
+									.bind(userName)
+									.all();
+
+
+								var connected_class_Code = connectedUsersResults[0].class_Code;
+
+
+								if (connected_class_Code == class_Code) {//指定されたクラスにすでに参加しているとき
+									currentTime = String(Math.floor(new Date().getTime() / 1000));
+									await env.D1_DATABASE.prepare(//接続済みユーザーのデータを変更
+										"UPDATE ConnectedUsers SET connected_Time = ? WHERE connected_User_Name = ? AND connected_User_Email = ?"
+									).bind(currentTime, userName, userEmail).run();
+
+									specifiedClassInfo.push({ "message": "You are already connected to specified class. Reconnected class.", "status_Code": "J-2", "result": "success" })
+									return new Response(JSON.stringify(specifiedClassInfo), await headerMaker(200, true));
+								}
+								currentTime = String(Math.floor(new Date().getTime() / 1000));
+
+
+								await env.D1_DATABASE.prepare(//接続済みクラスの接続数を1減らす=切断処理
+									"UPDATE Classes SET students = ? WHERE class_Code = ?"
+								)
+									.bind(String(Number(specifiedClassInfo[0].students) - 1), connected_class_Code)
+									.run();
+
+								var Maximum_Student_Count;
+								if (IsInvalid(class_Settings.MaximumStudent)) {//v3.0以前のクラスの対応
+									Maximum_Student_Count = 100;//デフォルト値である100にする
+								}
+								else {
+									Maximum_Student_Count = class_Settings.MaximumStudent//設定されていたらそれにする
+								}
+
+								if (specifiedClassInfo[0].students != Maximum_Student_Count) {//最大数チェック
+									await env.D1_DATABASE.prepare(//新クラスへ再参加
+										"UPDATE Classes SET students = " + String(Number(specifiedClassInfo[0].students) + 1) + " WHERE class_Code = " + class_Code
+									).run();
+
+									await env.D1_DATABASE.prepare(//接続済みユーザーのデータを変更
+										"UPDATE ConnectedUsers SET connected_Time = ? , class_Code = ? WHERE connected_User_Name = ? AND connected_User_Email = ?"
+									).bind(currentTime, class_Code, userName, userEmail)
+										.run();
+
+									//履歴追加処理。v3.5でリリース。まだ準備段階なのでコメントアウトしています。
+									//History modifying codes. COMMENTED OUT BECAUSE NOT REREASED VERSION.
+									/*
+									await env.D1_DATABASE.prepare(
+			  	
+									).bind();
+									*/
+									//履歴追加処理終了。
+
+									console.log("User updated connected class.");//接続成功
+									//接続成功情報を追加
+									specifiedClassInfo.push({ "message": "You are already connected to another class. Updated connected class.", "status_Code": "J-3", "result": "success" })
+									//接続成功情報を追加
+									return new Response(JSON.stringify(specifiedClassInfo), await headerMaker(200, true));
+								}
+								else {//接続生徒数が最大値を超えたとき
+									console.log("exceeded student maximum count.")
+									return new Response(JSON.stringify([{ "message": "Exceeded Maximum Student Count. You cannnot connect this class.", "status_Code": "JE-06", "result": "error" }]), await headerMaker(403, true));
+								}
+							}
+							catch (error) {//Dbのエラー。これ以上は書ききれん。
+								console.log("Database error occured.", error)
+								return new Response(JSON.stringify([{ "message": "Error updating connected class info. Please contact to support. : " + error, "status_Code": "JE-02", "result": "error" }]), await headerMaker(500, true));
+							}
+						}
+						else {//Dbのエラー。これ以上は書ききれん。
+							console.error("Error adding user to ConnectedUsers table:", error);
+							return new Response(JSON.stringify([{ "message": "Failed to connect class. Plase contact to support.", "status_Code": "JE-03", "result": "error" }]), await headerMaker(500, true));
+						}
+					}
+					//クラステーブルへの追加処理終了
+				}
+				else {//クラスがアクティブでないとき
+					specifiedClassInfo.push({ "message": "Found class, but class is not active. check class code.", "status_Code": "JE-12", "result": "error" })
+					return new Response(JSON.stringify(specifiedClassInfo), await headerMaker(404, true));
+				}
+			}
+			else {//指定したクラスが存在しない
+				console.error("Specified class did not found.");
+				return new Response(JSON.stringify([{ "message": "Specified class did not found.", "status_Code": "JE-01", "result": "error" }]), await headerMaker(404, true));
+			}
+		}
+		catch (error) {
+			console.error("DataBase error." + error)
+			return new Response(JSON.stringify([{ "message": "DataBase error. Please contact to support:support@cla-q.net", "status_Code": "JE-05", "result": "error" }]), await headerMaker(500, true));
+		}
+	}
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	else if (pathname === "/v2/student/leave") {//生徒がクラスから抜ける(statuscode L or LE)
+		//データ吸出し
+		try {
+			const data = await request.json();
+			var userName = data.userName;
+			var userEmail = data.userEmail;
+			if (IsInvalid(userName) && IsInvalid(userEmail)) {
+				console.error("required value is not specified.");//必要なデータが与えられていない
+				return new Response(JSON.stringify([{ "message": "Required value is not specified.:", "status_Code": "NE-11", "result": "error" }]), await headerMaker(400, true));
+			}
+		}
+		catch (error) {//データが吸い出せなかったとき
+			console.error("required value is not specified.");//必要なデータが与えられていない
+			return new Response(JSON.stringify([{ "message": "Required value is not specified.:", "status_Code": "NE-11", "result": "error" }]), await headerMaker(400, true));
+		}
+
+
+		const { results: connectedUsersResults } = await env.D1_DATABASE.prepare(//すでに接続しているクラスのクラスコードを取得
+			"SELECT * FROM ConnectedUsers WHERE connected_User_Name = ? AND connected_User_Email = ?"
+		)
+			.bind(userName, userEmail)
+			.all();
+
+		if (connectedUsersResults.length == 0) {//接続しているクラスがないとき
+			console.error("You are not joined to any classes.");//生徒数の変更失敗処理
+			return new Response(JSON.stringify([{ "message": "You are not joined to any classes.", "status_Code": "LE-11", "result": "error" }]), await headerMaker(400, true));
+		}
+		else {//接続しているクラスが1つだけあるとき(2つ以上はDBがはじくのでありえない)
+			var connected_class_Code = connectedUsersResults[0].class_Code;
+
+			const { results: connectedClassInfo } = await env.D1_DATABASE.prepare(//接続済みのクラスを検索
+				"SELECT * FROM Classes WHERE class_Code = ?"
+			)
+				.bind(connected_class_Code)
+				.all();
+
+			if (connectedClassInfo[0].students != 0) {
+				await env.D1_DATABASE.prepare(//接続済みクラスの接続数を1減らす=切断処理
+					"UPDATE Classes SET students = ? WHERE class_Code = ?"
+				)
+					.bind(Number(connectedClassInfo[0].students) - 1, connected_class_Code)
+					.run();
+
+				await env.D1_DATABASE.prepare(//接続済みリストから削除
+					"DELETE FROM ConnectedUsers WHERE connected_User_Name = ? AND connected_User_Email = ?"
+				)
+					.bind(userName, userEmail)
+					.run();
+
+				console.log("Succesfully leaved class.");//切断成功処理
+				return new Response(JSON.stringify([{ "message": "You succesfully leaved class:" + connected_class_Code, "status_Code": "L-01", "result": "success" }]), await headerMaker(200, true));
+			}
+		}
+	}
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	else if (pathname === "/v2/student/submit_answer") { //生徒:答えの送信
+		try {
+			const data = await request.json();
+			var userName = data.userName;
+			var userEmail = data.userEmail;
+			var class_Code = data.class_Code;
+			var answer_Value = data.answer_Value;
+		}
+		catch (error) {//データが吸い出せなかったとき
+			console.error("required value is not specified.");//必要なデータが与えられていない
+			console.log(error)
+			return new Response(JSON.stringify([{ "message": "Required value is not specified.:", "status_Code": "NE-11", "result": "error" }]), await headerMaker(400, true));
+		}
+		const { results: specifiedClassInfo } = await env.D1_DATABASE.prepare(
+			"SELECT * FROM Classes WHERE class_Code = ?"
+		)
+			.bind(class_Code)
+			.all();
+		console.log("Query results:", specifiedClassInfo);
+		var currentTime = String(Math.floor(new Date().getTime() / 1000));
+		var currentQuestionNumber = specifiedClassInfo[0].current_Question_Number;
+		if (currentQuestionNumber == "0") {
+			console.error("No questions are opened.");//必要なデータが与えられていない
+			return new Response(JSON.stringify([{ "message": "No questions are opened.", "status_Code": "SSE-11", "result": "error" }]), await headerMaker(403, true));
+		}
+		try {
+			if (userName == "Uptime") {
+				try {
+					await env.D1_DATABASE.prepare("INSERT INTO Answers VALUES ( ? , ? , ? , ? , ? , ?)"
+					).bind(class_Code, String(currentQuestionNumber), answer_Value, userName, userEmail, currentTime)
+						.run();
+					return new Response(JSON.stringify([{ "message": "Successfully submitted the answer.", "status_Code": "SS-01", "result": "success" }]), await headerMaker(200, true));
+				}
+				catch {
+					return new Response(JSON.stringify([{ "message": "DataBase error.", "status_Code": "SSE-01", "result": "error" }]), await headerMaker(500, true));
+				}
+			}
+			else {
+				const { results: answerExistCheck } = await env.D1_DATABASE.prepare(
+					"SELECT * FROM Answers WHERE class_Code = ? AND question_Number = ? AND submitted_User_Email = ?"
+				)
+					.bind(class_Code, String(currentQuestionNumber), userEmail)
+					.all();
+				console.log(class_Code, answerExistCheck);
+				console.log(answerExistCheck);
+				if (answerExistCheck.length != 0) {
+					console.error("User already submitted answer.");//D
+					return new Response(JSON.stringify([{ "message": "You already submitted the answer.", "status_Code": "SSE-12", "result": "error" }]), await headerMaker(400, true));
+				}
+				await env.D1_DATABASE.prepare("INSERT INTO Answers VALUES ( ? , ? , ? , ? , ? , ?)"
+				).bind(class_Code, String(currentQuestionNumber), answer_Value, userName, userEmail, currentTime)
+					.run();
+				console.log("Successfully submitted the answer.");//必要なデータが与えられていない
+				return new Response(JSON.stringify([{ "message": "Successfully submitted the answer.", "status_Code": "SS-01", "result": "success" }]), await headerMaker(200, true));
+			}
+		}
+		catch (error) {
+			console.error("DataBase error.", error);//DBエラー
+			return new Response(JSON.stringify([{ "message": "DataBase error.", "status_Code": "SSE-01", "result": "error" }]), await headerMaker(500, true));
+		}
+	}
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	else if (pathname === "/v2/student/Class_Setitngs") {
+		const data = await request.json();
+		var class_Code = data.class_Code;
+		if (IsInvalid(class_Code)) {
+			console.error("required value is not specified.",);//生徒数の変更失敗処理
+			return new Response(JSON.stringify([{ "message": "Required value is not specified.:", "status_Code": "NE-11", "result": "error" }]), await headerMaker(400, true));
+		}
+		console.log(class_Code)
+		//クラス参加処理スタート
+		try {
+			const { results: specifiedClassInfo } = await env.D1_DATABASE.prepare(
+				"SELECT * FROM Classes WHERE class_Code = ?"
+			)
+				.bind(class_Code)
+				.all();
+
+			var class_Settings = JSON.parse("[" + specifiedClassInfo[0].Settings + "]");
+			console.log("Query results:", specifiedClassInfo);
+			console.log(class_Settings);
+
+			class_Settings.push({ "message": "Successfully fetched class setting", "status_Code": "S-01", "result": "success" });
+			return new Response(JSON.stringify(class_Settings), await headerMaker(200, true));
+		}
+		catch (error) {
+			console.log(error);
+			return new Response(JSON.stringify([{ "message": error, "status_Code": "SE-01", "result": "error" }]), await headerMaker(400, true));
+		}
+	}
+	//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	else if (pathname === "/v2/student/teapot") {//ジョーク
+		return new Response("How do you know this API pathname? 418 I'm a teapot.", {
+			status: 418,
+			headers: {
+				"Content-Type": "text/plain",
+				"Vary": "Origin",
+				"Access-Control-Allow-Credentials": "true",
+				"Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+				"Access-Control-Allow-Headers": "Content-Type"
+			},
+		});
+	}
+}
 
 
 
